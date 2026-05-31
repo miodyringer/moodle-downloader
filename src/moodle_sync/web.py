@@ -763,7 +763,10 @@ function renderDrawer(drawer, courseId, sections) {
     drawer.innerHTML = '<div class="loading">No sections found.</div>';
     return;
   }
-  let html = '';
+  let html = `<div class="filter-bulk">
+    <button class="link" data-bulk="all">select all</button>
+    <button class="link" data-bulk="none">clear all</button>
+  </div>`;
   for (const sec of sections) {
     const secExcluded = exc.excluded_sections.has(sec.name);
     html += `<div class="filter-section">
@@ -788,10 +791,6 @@ function renderDrawer(drawer, courseId, sections) {
     html += '</div>';
   }
   html += '<p class="filter-hint">Unchecked items will be skipped during sync.</p>';
-  html += `<div class="filter-bulk">
-    <button class="link" data-bulk="all">select all</button>
-    <button class="link" data-bulk="none">clear all</button>
-  </div>`;
   drawer.innerHTML = html;
 
   drawer.querySelectorAll('[data-bulk]').forEach((btn) => {
