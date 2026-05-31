@@ -725,8 +725,19 @@ function renderCourses(courses) {
     e.stopPropagation();
     toggleDrawer(btn.dataset.id);
   }));
-  // restore exclusion state for previously-saved courses
+  // restore exclusion state from saved config so "Save & Start Sync" without
+  // opening the drawer preserves previously-configured exclusions
   (state.selected_courses || []).forEach((c) => {
+    if (!exclusions[c.id]) {
+      const actMap = new Map();
+      for (const [sec, acts] of Object.entries(c.excluded_activities || {})) {
+        actMap.set(sec, new Set(acts));
+      }
+      exclusions[c.id] = {
+        excluded_sections: new Set(c.excluded_sections || []),
+        excluded_activities: actMap,
+      };
+    }
     const hasSecExc = c.excluded_sections && c.excluded_sections.length;
     const hasActExc = c.excluded_activities && Object.keys(c.excluded_activities).length;
     if (hasSecExc || hasActExc) {
