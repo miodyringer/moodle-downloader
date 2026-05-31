@@ -450,6 +450,7 @@ _HTML = r"""<!doctype html>
   .filter-activity { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
   .filter-activity input { accent-color: var(--accent); width: 13px; height: 13px; flex-shrink: 0; }
   .filter-hint { font-size: 11px; color: var(--muted); margin-top: 10px; }
+  .filter-bulk { display: flex; gap: 14px; margin-top: 8px; }
 
   /* log */
   .log {
@@ -787,7 +788,29 @@ function renderDrawer(drawer, courseId, sections) {
     html += '</div>';
   }
   html += '<p class="filter-hint">Unchecked items will be skipped during sync.</p>';
+  html += `<div class="filter-bulk">
+    <button class="link" data-bulk="all">select all</button>
+    <button class="link" data-bulk="none">clear all</button>
+  </div>`;
   drawer.innerHTML = html;
+
+  drawer.querySelectorAll('[data-bulk]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const checked = btn.dataset.bulk === 'all';
+      drawer.querySelectorAll('input[data-type="section"]').forEach((cb) => { cb.checked = checked; });
+      drawer.querySelectorAll('input[data-type="activity"]').forEach((cb) => { cb.checked = checked; });
+      if (checked) {
+        exc.excluded_sections.clear();
+        exc.excluded_activities.clear();
+      } else {
+        sections.forEach((sec) => {
+          exc.excluded_sections.add(sec.name);
+          exc.excluded_activities.set(sec.name, new Set(sec.activities));
+        });
+      }
+      updateFilterBtn(courseId);
+    });
+  });
 
   // wire up section-level checkboxes (toggle all activities inside)
   drawer.querySelectorAll('input[data-type="section"]').forEach((cb) => {
