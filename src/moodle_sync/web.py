@@ -53,12 +53,16 @@ class LoginIn(BaseModel):
     remember: bool = True
 
 
+class CourseExclusionsIn(BaseModel):
+    excluded_sections: list[str] = []
+    excluded_activities: dict[str, list[str]] = {}
+
+
 class CoursesIn(BaseModel):
     course_ids: list[str]
     download_dir: str = "moodle_documents"
     max_folder_depth: int = 5
-    # keys are course_ids; each value has optional "excluded_sections" / "excluded_activities"
-    exclusions: dict[str, dict[str, list[str]]] = {}
+    exclusions: dict[str, CourseExclusionsIn] = {}
 
 
 @app.get("/api/state")
@@ -148,9 +152,9 @@ def api_save_courses(body: CoursesIn):
     if not chosen and body.course_ids:
         raise HTTPException(status_code=400, detail="No matching courses.")
     for c in chosen:
-        exc = body.exclusions.get(c.id, {})
-        c.excluded_sections = exc.get("excluded_sections", [])
-        c.excluded_activities = exc.get("excluded_activities", [])
+        exc = body.exclusions.get(c.id)
+        c.excluded_sections = exc.excluded_sections if exc else []
+        c.excluded_activities = exc.excluded_activities if exc else {}
     cfg = Config.load()
     cfg.courses = chosen
     cfg.download_dir = body.download_dir or "moodle_documents"
