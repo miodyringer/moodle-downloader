@@ -636,7 +636,13 @@ async function api(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+  if (!r.ok) {
+    const detail = data.detail;
+    const msg = Array.isArray(detail)
+      ? detail.map((e) => e.msg || JSON.stringify(e)).join('; ')
+      : (detail || ('HTTP ' + r.status));
+    throw new Error(msg);
+  }
   return data;
 }
 
@@ -869,7 +875,7 @@ function escapeHtml(s) {
 async function saveAndSync() {
   const errEl = $('#err-courses');
   errEl.textContent = '';
-  const ids = $$('#courses-list input[type="checkbox"]:checked').map((i) => i.value);
+  const ids = $$('#courses-list input[type="checkbox"][value]:checked').map((i) => i.value);
   if (ids.length === 0) { errEl.textContent = 'Select at least one course.'; return; }
 
   // build exclusions payload: only include courses that have a loaded drawer
