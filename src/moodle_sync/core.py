@@ -256,7 +256,7 @@ class Syncer:
                     activity_name = a.get_text(strip=True) if a else None
                 if not activity_name:
                     continue
-                if activity_name in (course.excluded_activities or []):
+                if activity_name in (course.excluded_activities or {}).get(section_name, []):
                     self.progress({"kind": "info", "msg": f"(skipped: {activity_name})"})
                     continue
                 link = activity.find("a", href=True)

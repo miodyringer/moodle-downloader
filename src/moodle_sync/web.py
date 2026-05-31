@@ -197,7 +197,7 @@ def api_course_sections(course_id: str):
     cfg = Config.load()
     saved = next((c for c in cfg.courses if c.id == course_id), None)
     excluded_sections = saved.excluded_sections if saved else []
-    excluded_activities = saved.excluded_activities if saved else []
+    excluded_activities = saved.excluded_activities if saved else {}
 
     return {
         "course_id": course_id,
@@ -716,7 +716,9 @@ function renderCourses(courses) {
   }));
   // restore exclusion state for previously-saved courses
   (state.selected_courses || []).forEach((c) => {
-    if (c.excluded_sections && c.excluded_sections.length || c.excluded_activities && c.excluded_activities.length) {
+    const hasSecExc = c.excluded_sections && c.excluded_sections.length;
+    const hasActExc = c.excluded_activities && Object.keys(c.excluded_activities).length;
+    if (hasSecExc || hasActExc) {
       const btn = list.querySelector(`.filter-btn[data-id="${c.id}"]`);
       if (btn) btn.classList.add('has-exclusions');
     }
@@ -724,7 +726,7 @@ function renderCourses(courses) {
   updateSelectedCount();
 }
 
-// per-course exclusion state: { courseId -> { excluded_sections: Set, excluded_activities: Set } }
+// per-course exclusion state: { courseId -> { excluded_sections: Set, excluded_activities: Map<sectionName, Set<actName>> } }
 const exclusions = {};
 
 async function toggleDrawer(courseId) {
@@ -739,9 +741,13 @@ async function toggleDrawer(courseId) {
     const data = await api(`/api/courses/${courseId}/sections`);
     drawer.dataset.loaded = '1';
     if (!exclusions[courseId]) {
+      const actMap = new Map();
+      for (const [sec, acts] of Object.entries(data.excluded_activities || {})) {
+        actMap.set(sec, new Set(acts));
+      }
       exclusions[courseId] = {
         excluded_sections: new Set(data.excluded_sections || []),
-        excluded_activities: new Set(data.excluded_activities || []),
+        excluded_activities: actMap,
       };
     }
     renderDrawer(drawer, courseId, data.sections);
@@ -751,7 +757,7 @@ async function toggleDrawer(courseId) {
 }
 
 function renderDrawer(drawer, courseId, sections) {
-  const exc = exclusions[courseId] || { excluded_sections: new Set(), excluded_activities: new Set() };
+  const exc = exclusions[courseId] || { excluded_sections: new Set(), excluded_activities: new Map() };
   if (!sections.length) {
     drawer.innerHTML = '<div class="loading">No sections found.</div>';
     return;
@@ -769,10 +775,10 @@ function renderDrawer(drawer, courseId, sections) {
     if (sec.activities.length) {
       html += '<div class="filter-activities">';
       for (const act of sec.activities) {
-        const actExcluded = exc.excluded_activities.has(act);
+        const actExcluded = exc.excluded_activities.get(sec.name)?.has(act) ?? false;
         html += `<label class="filter-activity">
           <input type="checkbox" ${actExcluded ? '' : 'checked'}
-                 data-course="${courseId}" data-type="activity" data-name="${escapeHtml(act)}" />
+                 data-course="${courseId}" data-type="activity" data-section="${escapeHtml(sec.name)}" data-name="${escapeHtml(act)}" />
           ${escapeHtml(act)}
         </label>`;
       }
@@ -795,8 +801,12 @@ function renderDrawer(drawer, courseId, sections) {
       secDiv.querySelectorAll('input[data-type="activity"]').forEach((acb) => {
         acb.checked = checked;
         const actName = acb.dataset.name;
-        if (checked) exc.excluded_activities.delete(actName);
-        else exc.excluded_activities.add(actName);
+        if (checked) {
+          exc.excluded_activities.get(secName)?.delete(actName);
+        } else {
+          if (!exc.excluded_activities.has(secName)) exc.excluded_activities.set(secName, new Set());
+          exc.excluded_activities.get(secName).add(actName);
+        }
       });
       updateFilterBtn(courseId);
     });
@@ -804,9 +814,14 @@ function renderDrawer(drawer, courseId, sections) {
 
   drawer.querySelectorAll('input[data-type="activity"]').forEach((cb) => {
     cb.addEventListener('change', () => {
+      const secName = cb.dataset.section;
       const actName = cb.dataset.name;
-      if (cb.checked) exc.excluded_activities.delete(actName);
-      else exc.excluded_activities.add(actName);
+      if (cb.checked) {
+        exc.excluded_activities.get(secName)?.delete(actName);
+      } else {
+        if (!exc.excluded_activities.has(secName)) exc.excluded_activities.set(secName, new Set());
+        exc.excluded_activities.get(secName).add(actName);
+      }
       updateFilterBtn(courseId);
     });
   });
@@ -816,7 +831,8 @@ function updateFilterBtn(courseId) {
   const btn = $(`.filter-btn[data-id="${courseId}"]`);
   if (!btn) return;
   const exc = exclusions[courseId];
-  const hasExc = exc && (exc.excluded_sections.size > 0 || exc.excluded_activities.size > 0);
+  const hasActExc = exc && [...exc.excluded_activities.values()].some((s) => s.size > 0);
+  const hasExc = exc && (exc.excluded_sections.size > 0 || hasActExc);
   btn.classList.toggle('has-exclusions', !!hasExc);
 }
 
@@ -837,9 +853,13 @@ async function saveAndSync() {
   // build exclusions payload: only include courses that have a loaded drawer
   const excPayload = {};
   for (const [cid, exc] of Object.entries(exclusions)) {
+    const actObj = {};
+    for (const [sec, acts] of exc.excluded_activities.entries()) {
+      if (acts.size > 0) actObj[sec] = Array.from(acts);
+    }
     excPayload[cid] = {
       excluded_sections: Array.from(exc.excluded_sections),
-      excluded_activities: Array.from(exc.excluded_activities),
+      excluded_activities: actObj,
     };
   }
 

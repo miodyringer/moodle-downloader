@@ -35,7 +35,8 @@ class Course:
     name: str
     url: str
     excluded_sections: list[str] = field(default_factory=list)
-    excluded_activities: list[str] = field(default_factory=list)
+    # keys = section name, values = activity names excluded within that section
+    excluded_activities: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -61,7 +62,9 @@ class Config:
                 name=c["name"],
                 url=c["url"],
                 excluded_sections=c.get("excluded_sections", []),
-                excluded_activities=c.get("excluded_activities", []),
+                excluded_activities=(
+                    raw if isinstance((raw := c.get("excluded_activities", {})), dict) else {}
+                ),
             )
             for c in data.pop("courses", [])
         ]
