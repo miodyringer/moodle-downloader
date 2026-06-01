@@ -53,10 +53,16 @@ class LoginIn(BaseModel):
     remember: bool = True
 
 
+class CourseExclusionsIn(BaseModel):
+    excluded_sections: list[str] = []
+    excluded_activities: dict[str, list[str]] = {}
+
+
 class CoursesIn(BaseModel):
     course_ids: list[str]
     download_dir: str = "moodle_documents"
     max_folder_depth: int = 5
+    exclusions: dict[str, CourseExclusionsIn] = {}
 
 
 @app.get("/api/state")
@@ -145,12 +151,64 @@ def api_save_courses(body: CoursesIn):
     chosen = [c for c in available if c.id in body.course_ids]
     if not chosen and body.course_ids:
         raise HTTPException(status_code=400, detail="No matching courses.")
+    for c in chosen:
+        exc = body.exclusions.get(c.id)
+        c.excluded_sections = exc.excluded_sections if exc else []
+        c.excluded_activities = exc.excluded_activities if exc else {}
     cfg = Config.load()
     cfg.courses = chosen
     cfg.download_dir = body.download_dir or "moodle_documents"
     cfg.max_folder_depth = max(1, min(10, body.max_folder_depth))
     cfg.save()
     return {"ok": True, "selected": [asdict(c) for c in chosen]}
+
+
+@app.get("/api/courses/{course_id}/sections")
+def api_course_sections(course_id: str):
+    client: Optional[MoodleClient] = _state["client"]
+    if client is None:
+        raise HTTPException(status_code=401, detail="Not logged in.")
+    available = _state["available_courses"]
+    course = next((c for c in available if c.id == course_id), None)
+    if course is None:
+        raise HTTPException(status_code=404, detail="Course not found.")
+
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
+
+    try:
+        page = client.session.get(course.url, timeout=30)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not load course: {e}")
+
+    soup = BeautifulSoup(page.text, "html.parser")
+    sections = []
+    for sec in soup.find_all("li", {"data-sectionname": True}):
+        section_name = sec.get("data-sectionname", "").strip()
+        if not section_name:
+            continue
+        activities = []
+        for act in sec.find_all("div", class_="activity-item"):
+            name = act.get("data-activityname")
+            if not name:
+                a = act.find("a", class_="aalink")
+                name = a.get_text(strip=True) if a else None
+            if name:
+                activities.append(name)
+        sections.append({"name": section_name, "activities": activities})
+
+    # also attach current exclusions if this course is already saved
+    cfg = Config.load()
+    saved = next((c for c in cfg.courses if c.id == course_id), None)
+    excluded_sections = saved.excluded_sections if saved else []
+    excluded_activities = saved.excluded_activities if saved else {}
+
+    return {
+        "course_id": course_id,
+        "sections": sections,
+        "excluded_sections": excluded_sections,
+        "excluded_activities": excluded_activities,
+    }
 
 
 @app.post("/api/sync/start")
@@ -370,6 +428,34 @@ _HTML = r"""<!doctype html>
   .link { background: none; border: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
   .link:hover { color: var(--ink); }
 
+  /* filter drawer */
+  .filter-btn {
+    font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em;
+    padding: 5px 10px; border: 1px solid rgba(0,0,0,0.3); background: transparent; cursor: pointer;
+    color: var(--muted); white-space: nowrap;
+  }
+  .filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .filter-btn.has-exclusions { border-color: var(--warn); color: var(--warn); }
+  .filter-drawer {
+    display: none; grid-column: 1 / -1; background: var(--paper-dim);
+    border: 1px solid rgba(0,0,0,0.15); border-top: none;
+    padding: 16px 18px 18px; margin: 0 0 4px;
+  }
+  .filter-drawer.open { display: block; }
+  .filter-drawer .loading { color: var(--muted); font-size: 12px; }
+  .filter-section { margin-bottom: 14px; }
+  .filter-section-head {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em;
+  }
+  .filter-section-head input { accent-color: var(--accent); width: 15px; height: 15px; flex-shrink: 0; }
+  .filter-section-head .sec-name { font-weight: 700; color: var(--ink); }
+  .filter-activities { padding-left: 26px; display: flex; flex-direction: column; gap: 4px; }
+  .filter-activity { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .filter-activity input { accent-color: var(--accent); width: 13px; height: 13px; flex-shrink: 0; }
+  .filter-hint { font-size: 11px; color: var(--muted); margin-top: 10px; }
+  .filter-bulk { display: flex; gap: 14px; margin-top: 8px; }
+
   /* log */
   .log {
     background: #0f0f0f;
@@ -554,7 +640,13 @@ async function api(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+  if (!r.ok) {
+    const detail = data.detail;
+    const msg = Array.isArray(detail)
+      ? detail.map((e) => e.msg || JSON.stringify(e)).join('; ')
+      : (detail || ('HTTP ' + r.status));
+    throw new Error(msg);
+  }
   return data;
 }
 
@@ -615,21 +707,180 @@ function renderCourses(courses) {
   list.innerHTML = courses
     .map(
       (c) => `
-      <label class="row">
-        <input type="checkbox" value="${c.id}" ${previouslySelected.has(c.id) ? 'checked' : ''} />
-        <div>
-          <div class="name">${escapeHtml(c.name)}</div>
+      <div class="course-entry" data-id="${c.id}" data-name="${escapeHtml(c.name)}">
+        <div class="row">
+          <input type="checkbox" value="${c.id}" ${previouslySelected.has(c.id) ? 'checked' : ''} />
+          <div>
+            <div class="name">${escapeHtml(c.name)}</div>
+            <div class="id">id ${c.id}</div>
+          </div>
+          <button class="filter-btn" data-id="${c.id}" title="Filter sections &amp; modules">filter</button>
         </div>
-        <div class="id">id ${c.id}</div>
-      </label>`,
+        <div class="filter-drawer" id="drawer-${c.id}"></div>
+      </div>`,
     )
     .join('');
-  list.querySelectorAll('input').forEach((i) => i.addEventListener('change', updateSelectedCount));
+  list.querySelectorAll('input[type="checkbox"]').forEach((i) => i.addEventListener('change', updateSelectedCount));
+  list.querySelectorAll('.filter-btn').forEach((btn) => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleDrawer(btn.dataset.id);
+  }));
+  // restore exclusion state from saved config so "Save & Start Sync" without
+  // opening the drawer preserves previously-configured exclusions
+  (state.selected_courses || []).forEach((c) => {
+    if (!exclusions[c.id]) {
+      const actMap = new Map();
+      for (const [sec, acts] of Object.entries(c.excluded_activities || {})) {
+        actMap.set(sec, new Set(acts));
+      }
+      exclusions[c.id] = {
+        excluded_sections: new Set(c.excluded_sections || []),
+        excluded_activities: actMap,
+      };
+    }
+    const hasSecExc = c.excluded_sections && c.excluded_sections.length;
+    const hasActExc = c.excluded_activities && Object.keys(c.excluded_activities).length;
+    if (hasSecExc || hasActExc) {
+      const btn = list.querySelector(`.filter-btn[data-id="${c.id}"]`);
+      if (btn) btn.classList.add('has-exclusions');
+    }
+  });
   updateSelectedCount();
 }
 
+// per-course exclusion state: { courseId -> { excluded_sections: Set, excluded_activities: Map<sectionName, Set<actName>> } }
+const exclusions = {};
+
+async function toggleDrawer(courseId) {
+  const drawer = $(`#drawer-${courseId}`);
+  if (!drawer) return;
+  const isOpen = drawer.classList.contains('open');
+  if (isOpen) { drawer.classList.remove('open'); return; }
+  drawer.classList.add('open');
+  if (drawer.dataset.loaded) return;
+  drawer.innerHTML = '<div class="loading">Loading sections…</div>';
+  try {
+    const data = await api(`/api/courses/${courseId}/sections`);
+    drawer.dataset.loaded = '1';
+    if (!exclusions[courseId]) {
+      const actMap = new Map();
+      for (const [sec, acts] of Object.entries(data.excluded_activities || {})) {
+        actMap.set(sec, new Set(acts));
+      }
+      exclusions[courseId] = {
+        excluded_sections: new Set(data.excluded_sections || []),
+        excluded_activities: actMap,
+      };
+    }
+    renderDrawer(drawer, courseId, data.sections);
+  } catch (e) {
+    drawer.innerHTML = `<div class="loading" style="color:var(--err)">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderDrawer(drawer, courseId, sections) {
+  const exc = exclusions[courseId] || { excluded_sections: new Set(), excluded_activities: new Map() };
+  if (!sections.length) {
+    drawer.innerHTML = '<div class="loading">No sections found.</div>';
+    return;
+  }
+  let html = `<div class="filter-bulk">
+    <button class="link" data-bulk="all">select all</button>
+    <button class="link" data-bulk="none">clear all</button>
+  </div>`;
+  for (const sec of sections) {
+    const secExcluded = exc.excluded_sections.has(sec.name);
+    html += `<div class="filter-section">
+      <div class="filter-section-head">
+        <input type="checkbox" ${secExcluded ? '' : 'checked'}
+               data-course="${courseId}" data-type="section" data-name="${escapeHtml(sec.name)}"
+               id="sec-${courseId}-${escapeHtml(sec.name)}" />
+        <label class="sec-name" for="sec-${courseId}-${escapeHtml(sec.name)}">${escapeHtml(sec.name)}</label>
+      </div>`;
+    if (sec.activities.length) {
+      html += '<div class="filter-activities">';
+      for (const act of sec.activities) {
+        const actExcluded = exc.excluded_activities.get(sec.name)?.has(act) ?? false;
+        html += `<label class="filter-activity">
+          <input type="checkbox" ${actExcluded ? '' : 'checked'}
+                 data-course="${courseId}" data-type="activity" data-section="${escapeHtml(sec.name)}" data-name="${escapeHtml(act)}" />
+          ${escapeHtml(act)}
+        </label>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  html += '<p class="filter-hint">Unchecked items will be skipped during sync.</p>';
+  drawer.innerHTML = html;
+
+  drawer.querySelectorAll('[data-bulk]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const checked = btn.dataset.bulk === 'all';
+      drawer.querySelectorAll('input[data-type="section"]').forEach((cb) => { cb.checked = checked; });
+      drawer.querySelectorAll('input[data-type="activity"]').forEach((cb) => { cb.checked = checked; });
+      if (checked) {
+        exc.excluded_sections.clear();
+        exc.excluded_activities.clear();
+      } else {
+        sections.forEach((sec) => {
+          exc.excluded_sections.add(sec.name);
+          exc.excluded_activities.set(sec.name, new Set(sec.activities));
+        });
+      }
+      updateFilterBtn(courseId);
+    });
+  });
+
+  // wire up section-level checkboxes (toggle all activities inside)
+  drawer.querySelectorAll('input[data-type="section"]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const secName = cb.dataset.name;
+      const checked = cb.checked;
+      if (checked) exc.excluded_sections.delete(secName);
+      else exc.excluded_sections.add(secName);
+      // also toggle all activities in this section
+      const secDiv = cb.closest('.filter-section');
+      secDiv.querySelectorAll('input[data-type="activity"]').forEach((acb) => {
+        acb.checked = checked;
+        const actName = acb.dataset.name;
+        if (checked) {
+          exc.excluded_activities.get(secName)?.delete(actName);
+        } else {
+          if (!exc.excluded_activities.has(secName)) exc.excluded_activities.set(secName, new Set());
+          exc.excluded_activities.get(secName).add(actName);
+        }
+      });
+      updateFilterBtn(courseId);
+    });
+  });
+
+  drawer.querySelectorAll('input[data-type="activity"]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const secName = cb.dataset.section;
+      const actName = cb.dataset.name;
+      if (cb.checked) {
+        exc.excluded_activities.get(secName)?.delete(actName);
+      } else {
+        if (!exc.excluded_activities.has(secName)) exc.excluded_activities.set(secName, new Set());
+        exc.excluded_activities.get(secName).add(actName);
+      }
+      updateFilterBtn(courseId);
+    });
+  });
+}
+
+function updateFilterBtn(courseId) {
+  const btn = $(`.filter-btn[data-id="${courseId}"]`);
+  if (!btn) return;
+  const exc = exclusions[courseId];
+  const hasActExc = exc && [...exc.excluded_activities.values()].some((s) => s.size > 0);
+  const hasExc = exc && (exc.excluded_sections.size > 0 || hasActExc);
+  btn.classList.toggle('has-exclusions', !!hasExc);
+}
+
 function updateSelectedCount() {
-  $('#selected-count').textContent = $$('#courses-list input:checked').length;
+  $('#selected-count').textContent = $$('#courses-list input[type="checkbox"][value]').filter((i) => i.checked).length;
 }
 
 function escapeHtml(s) {
@@ -639,8 +890,22 @@ function escapeHtml(s) {
 async function saveAndSync() {
   const errEl = $('#err-courses');
   errEl.textContent = '';
-  const ids = $$('#courses-list input:checked').map((i) => i.value);
+  const ids = $$('#courses-list input[type="checkbox"][value]:checked').map((i) => i.value);
   if (ids.length === 0) { errEl.textContent = 'Select at least one course.'; return; }
+
+  // build exclusions payload: only include courses that have a loaded drawer
+  const excPayload = {};
+  for (const [cid, exc] of Object.entries(exclusions)) {
+    const actObj = {};
+    for (const [sec, acts] of exc.excluded_activities.entries()) {
+      if (acts.size > 0) actObj[sec] = Array.from(acts);
+    }
+    excPayload[cid] = {
+      excluded_sections: Array.from(exc.excluded_sections),
+      excluded_activities: actObj,
+    };
+  }
+
   try {
     await api('/api/courses', {
       method: 'POST',
@@ -648,6 +913,7 @@ async function saveAndSync() {
         course_ids: ids,
         download_dir: $('#download_dir').value.trim() || 'moodle_documents',
         max_folder_depth: parseInt($('#max_depth').value, 10) || 5,
+        exclusions: excPayload,
       },
     });
     await startSync();
@@ -731,8 +997,8 @@ $('#btn-forget').addEventListener('click', async () => {
   $('#password').value = '';
 });
 $('#password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(false); });
-$('#select-all').addEventListener('click', () => { $$('#courses-list input').forEach((i) => (i.checked = true)); updateSelectedCount(); });
-$('#select-none').addEventListener('click', () => { $$('#courses-list input').forEach((i) => (i.checked = false)); updateSelectedCount(); });
+$('#select-all').addEventListener('click', () => { $$('#courses-list input[type="checkbox"][value]').forEach((i) => (i.checked = true)); updateSelectedCount(); });
+$('#select-none').addEventListener('click', () => { $$('#courses-list input[type="checkbox"][value]').forEach((i) => (i.checked = false)); updateSelectedCount(); });
 $('#btn-save-sync').addEventListener('click', saveAndSync);
 $('#btn-back').addEventListener('click', () => ui.setStep(1));
 $('#btn-cancel').addEventListener('click', async () => { await api('/api/sync/cancel', { method: 'POST' }); });

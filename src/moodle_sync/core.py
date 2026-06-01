@@ -241,6 +241,9 @@ class Syncer:
             section_name = section.get("data-sectionname", "").strip()
             if not section_name:
                 continue
+            if section_name in (course.excluded_sections or []):
+                self.progress({"kind": "info", "msg": f"(skipped section: {section_name})"})
+                continue
             section_dir = course_dir / _sanitize(section_name)
             self.progress({"kind": "section", "msg": section_name})
 
@@ -252,6 +255,9 @@ class Syncer:
                     a = activity.find("a", class_="aalink")
                     activity_name = a.get_text(strip=True) if a else None
                 if not activity_name:
+                    continue
+                if activity_name in (course.excluded_activities or {}).get(section_name, []):
+                    self.progress({"kind": "info", "msg": f"(skipped: {activity_name})"})
                     continue
                 link = activity.find("a", href=True)
                 if not link:
@@ -299,7 +305,18 @@ class Syncer:
             return result
 
         soup = BeautifulSoup(page.text, "html.parser")
-        for a in soup.find_all("a", href=True):
+
+        # Restrict link discovery to the file-manager content area so that
+        # sidebar / navigation links are not mistaken for sub-folders or files.
+        content_root = (
+            soup.find(class_="filemanager")
+            or soup.find(id="folder_tree0")
+            or soup.find(class_="fp-content")
+            or soup.find(attrs={"role": "main"})
+            or soup
+        )
+
+        for a in content_root.find_all("a", href=True):
             if self._cancel:
                 break
             href = a["href"]

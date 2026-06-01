@@ -34,6 +34,9 @@ class Course:
     id: str
     name: str
     url: str
+    excluded_sections: list[str] = field(default_factory=list)
+    # keys = section name, values = activity names excluded within that section
+    excluded_activities: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -53,7 +56,18 @@ class Config:
             data = json.loads(p.read_text())
         except (OSError, json.JSONDecodeError):
             return cls()
-        courses = [Course(**c) for c in data.pop("courses", [])]
+        courses = [
+            Course(
+                id=c["id"],
+                name=c["name"],
+                url=c["url"],
+                excluded_sections=c.get("excluded_sections", []),
+                excluded_activities=(
+                    raw if isinstance((raw := c.get("excluded_activities", {})), dict) else {}
+                ),
+            )
+            for c in data.pop("courses", [])
+        ]
         # Drop any legacy 'password' field that might be sitting in the file
         data.pop("password", None)
         return cls(
