@@ -131,6 +131,30 @@ def _is_lang_link(text: str, href: str) -> bool:
     return bool(re.search(r"‎\([a-z]{2}(_[a-z]{2})?\)‎", text))
 
 
+def convert_google_url_to_download(
+    url: str, default_format: str = "pdf"
+) -> Optional[tuple[str, str]]:
+    for document_type in ("presentation", "document", "spreadsheets"):
+        match = re.search(
+            rf"docs\.google\.com/{document_type}/d/([a-zA-Z0-9_-]+)", url
+        )
+        if not match:
+            continue
+        document_id = match.group(1)
+        if document_type == "presentation":
+            export_url = (
+                f"https://docs.google.com/presentation/d/{document_id}/export/"
+                f"{default_format}"
+            )
+        else:
+            export_url = (
+                f"https://docs.google.com/{document_type}/d/{document_id}/export"
+                f"?format={default_format}"
+            )
+        return export_url, default_format
+    return None
+
+
 def _file_md5(path: Path) -> str:
     h = hashlib.md5()
     with path.open("rb") as f:
@@ -271,15 +295,32 @@ class Syncer:
                     result.skipped += sub.skipped
                     result.failed += sub.failed
                 elif "/mod/resource/view.php" in href or "/pluginfile.php/" in href:
-                    # Create a module directory for individual resources to keep them organized
-                    module_dir = section_dir / _sanitize(activity_name)
-                    ok = self._download_file(full_url, activity_name, module_dir)
+                    ok = self._download_file(full_url, activity_name, section_dir)
                     if ok is True:
                         result.downloaded += 1
                     elif ok is False:
                         result.skipped += 1
                     else:
                         result.failed += 1
+                elif "/mod/url/view.php" in href:
+                    try:
+                        target_url = self.session.head(
+                            full_url, allow_redirects=True, timeout=10
+                        ).url
+                    except requests.RequestException:
+                        target_url = full_url
+                    google_download = convert_google_url_to_download(target_url)
+                    if google_download:
+                        export_url, extension = google_download
+                        ok = self._download_file(
+                            export_url, f"{activity_name}.{extension}", section_dir
+                        )
+                        if ok is True:
+                            result.downloaded += 1
+                        elif ok is False:
+                            result.skipped += 1
+                        else:
+                            result.failed += 1
                 time.sleep(0.2)
         return result
 
